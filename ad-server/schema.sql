@@ -36,6 +36,16 @@ CREATE TABLE IF NOT EXISTS events (
     created_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Aggregated stats per campaign per day (updated by event-consumer)
+CREATE TABLE IF NOT EXISTS campaign_stats_daily (
+    campaign_id      INTEGER NOT NULL REFERENCES campaigns(id),
+    date             TEXT NOT NULL,
+    impressions      INTEGER NOT NULL DEFAULT 0,
+    clicks           INTEGER NOT NULL DEFAULT 0,
+    spend_cents      INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (campaign_id, date)
+);
+
 CREATE INDEX IF NOT EXISTS idx_events_campaign_created ON events(campaign_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_type_created ON events(event_type, created_at);
 CREATE INDEX IF NOT EXISTS idx_ads_campaign ON ads(campaign_id);

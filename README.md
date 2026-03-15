@@ -4,31 +4,38 @@ AI-powered ad ranking and second-price auction engine. See [docs/PLAN.md](docs/P
 
 ## Phase 1 (Foundation)
 
-- **Data:** SQLite (single file: campaigns, ads, events). No DB server required.
-- **Ad server:** Go service that fetches candidate ads and returns one (simple auction: highest bid wins).
+- **Data:** SQLite (campaigns, ads, events). No DB server required.
+- **Ad server:** Fetches candidates, runs auction, returns one ad.
 
-### Run locally
+## Phase 2 (Auction & Events)
 
-**Option A – Docker**
+- **Second-price auction:** Winner pays second-highest bid (or reserve).
+- **Kafka:** Ad-server produces impression and click events to topics `impressions` and `clicks`.
+- **Event-consumer:** Consumes from Kafka, writes to SQLite (`events` table) and updates `campaign_stats_daily`.
+
+### Run with Docker
 
 ```bash
-docker compose up -d ad-server
+docker compose up -d
+# Request an ad (logs impression to Kafka; event-consumer writes to SQLite)
 curl "http://localhost:8080/v1/ads?user_id=user1&placement=feed"
+# Log a click (send request_id, ad_id, campaign_id from the ad response)
+curl -X POST http://localhost:8080/v1/click -H "Content-Type: application/json" -d '{"ad_id":1,"campaign_id":1,"request_id":"optional"}'
 curl http://localhost:8080/health
 ```
 
-**Option B – Local (no Docker)**
+### Run ad-server only (no Kafka)
 
 ```bash
-cd ad-server
-go build -o ad-server .
-./ad-server
-# DB file: ./data/adengine.db (or set DB_PATH)
+docker compose up -d ad-server
+# Or locally: cd ad-server && go build && ./ad-server
+# DB_PATH=./data/adengine.db, no KAFKA_BROKERS → impressions/clicks not sent to Kafka
 ```
 
 ### Project layout
 
-- `ad-server/` — Go HTTP API + SQLite schema/seed (`schema.sql`, `seed.sql`)
+- `ad-server/` — Go HTTP API, SQLite schema/seed, second-price auction, Kafka producer (impressions, clicks)
+- `event-consumer/` — Go service: consumes Kafka → SQLite events + campaign_stats_daily
 - `docs/PLAN.md` — Full build plan and phases
 
-Later phases add: second-price auction, Kafka events, ranking service (ML), dashboard, deploy.
+Later phases: ranking service (ML), dashboard, deploy.

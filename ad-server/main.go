@@ -8,25 +8,41 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/julienschmidt/httprouter"
+	"github.com/segmentio/kafka-go"
 	_ "modernc.org/sqlite"
 )
 
-var db *sql.DB
+const (
+	reservePriceCents = 1
+	topicImpressions  = "impressions"
+	topicClicks       = "clicks"
+)
+
+var (
+	db            *sql.DB
+	impressWriter *kafka.Writer
+	clickWriter   *kafka.Writer
+	brokers       []string
+)
 
 func main() {
 	dbPath := os.Getenv("DB_PATH")
 	if dbPath == "" {
 		dbPath = "./data/adengine.db"
 	}
-	if err := os.MkdirAll("./data", 0755); err != nil && !os.IsExist(err) {
-		log.Fatalf("mkdir data: %v", err)
+	dir := filepath.Dir(dbPath)
+	if err := os.MkdirAll(dir, 0755); err != nil && !os.IsExist(err) {
+		log.Fatalf("mkdir: %v", err)
 	}
 
 	var err error
-	db, err = sql.Open("sqlite", dbPath+"?_foreign_keys=on")
+	db, err = sql.Open("sqlite", dbPath+"?_foreign_keys=on&_journal_mode=WAL")
 	if err != nil {
 		log.Fatalf("open db: %v", err)
 	}
@@ -48,8 +64,28 @@ func main() {
 		log.Fatalf("run seed: %v", err)
 	}
 
+	brokers = getBrokers()
+	if len(brokers) > 0 {
+		impressWriter = &kafka.Writer{
+			Addr:     kafka.TCP(brokers[0]),
+			Topic:    topicImpressions,
+			Balancer: &kafka.LeastBytes{},
+		}
+		clickWriter = &kafka.Writer{
+			Addr:     kafka.TCP(brokers[0]),
+			Topic:    topicClicks,
+			Balancer: &kafka.LeastBytes{},
+		}
+		defer impressWriter.Close()
+		defer clickWriter.Close()
+		log.Printf("kafka producer: %v", brokers)
+	} else {
+		log.Printf("kafka disabled (no KAFKA_BROKERS)")
+	}
+
 	router := httprouter.New()
 	router.GET("/v1/ads", handleGetAds)
+	router.POST("/v1/click", handleClick)
 	router.GET("/health", handleHealth)
 
 	addr := ":8080"
@@ -57,6 +93,21 @@ func main() {
 	if err := http.ListenAndServe(addr, router); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func getBrokers() []string {
+	s := os.Getenv("KAFKA_BROKERS")
+	if s == "" {
+		return nil
+	}
+	var out []string
+	for _, b := range strings.Split(s, ",") {
+		b = strings.TrimSpace(b)
+		if b != "" {
+			out = append(out, b)
+		}
+	}
+	return out
 }
 
 func runSchema() error {
@@ -99,11 +150,70 @@ type candidate struct {
 	LandingURL string
 }
 
+// byBid sorts by BidCents descending, then AdID for tie-break.
+type byBid []candidate
+
+func (b byBid) Len() int           { return len(b) }
+func (b byBid) Less(i, j int) bool { return b[i].BidCents > b[j].BidCents || (b[i].BidCents == b[j].BidCents && b[i].AdID < b[j].AdID) }
+func (b byBid) Swap(i, j int)      { b[i], b[j] = b[j], b[i] }
+
+// runSecondPriceAuction returns winner and price_paid_cents (second-highest bid or reserve).
+func runSecondPriceAuction(candidates []candidate) (winner candidate, pricePaidCents int64) {
+	if len(candidates) == 0 {
+		return candidate{}, 0
+	}
+	sorted := make([]candidate, len(candidates))
+	copy(sorted, candidates)
+	sort.Sort(byBid(sorted))
+	winner = sorted[0]
+	if len(sorted) < 2 {
+		pricePaidCents = reservePriceCents
+		return
+	}
+	pricePaidCents = sorted[1].BidCents
+	if pricePaidCents < reservePriceCents {
+		pricePaidCents = reservePriceCents
+	}
+	return
+}
+
+type impressionEvent struct {
+	RequestID      string `json:"request_id"`
+	UserID         string `json:"user_id"`
+	AdID           int64  `json:"ad_id"`
+	CampaignID     int64  `json:"campaign_id"`
+	EventType      string `json:"event_type"`
+	PricePaidCents int64  `json:"price_paid_cents"`
+	Timestamp      string `json:"timestamp"`
+}
+
+func produceImpression(reqID, userID string, adID, campaignID, pricePaidCents int64) {
+	if impressWriter == nil {
+		return
+	}
+	ev := impressionEvent{
+		RequestID:      reqID,
+		UserID:         userID,
+		AdID:           adID,
+		CampaignID:     campaignID,
+		EventType:      "impression",
+		PricePaidCents: pricePaidCents,
+		Timestamp:      time.Now().UTC().Format(time.RFC3339),
+	}
+	body, _ := json.Marshal(ev)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := impressWriter.WriteMessages(ctx, kafka.Message{Key: []byte(reqID), Value: body}); err != nil {
+		log.Printf("kafka write impression: %v", err)
+	}
+}
+
 func handleGetAds(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 	userID := r.URL.Query().Get("user_id")
 	if userID == "" {
 		userID = "anonymous"
 	}
+	requestID := fmt.Sprintf("%d", time.Now().UnixNano())
 
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
@@ -117,16 +227,13 @@ func handleGetAds(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 	if len(candidates) == 0 {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{"ad": nil})
+		json.NewEncoder(w).Encode(map[string]interface{}{"ad": nil, "request_id": requestID})
 		return
 	}
 
-	winner := candidates[0]
-	for _, c := range candidates[1:] {
-		if c.BidCents > winner.BidCents {
-			winner = c
-		}
-	}
+	winner, pricePaidCents := runSecondPriceAuction(candidates)
+
+	go produceImpression(requestID, userID, winner.AdID, winner.CampaignID, pricePaidCents)
 
 	resp := map[string]interface{}{
 		"ad": map[string]interface{}{
@@ -137,10 +244,68 @@ func handleGetAds(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 			"image_url":   winner.ImageURL,
 			"landing_url": winner.LandingURL,
 		},
-		"user_id": userID,
+		"user_id":     userID,
+		"request_id":  requestID,
+		"price_paid_cents": pricePaidCents,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+type clickRequest struct {
+	RequestID  string `json:"request_id"`
+	AdID       int64  `json:"ad_id"`
+	CampaignID int64  `json:"campaign_id"`
+	UserID     string `json:"user_id,omitempty"`
+}
+
+func produceClick(ev impressionEvent) {
+	if clickWriter == nil {
+		return
+	}
+	ev.EventType = "click"
+	ev.Timestamp = time.Now().UTC().Format(time.RFC3339)
+	body, _ := json.Marshal(ev)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := clickWriter.WriteMessages(ctx, kafka.Message{Key: []byte(ev.RequestID), Value: body}); err != nil {
+		log.Printf("kafka write click: %v", err)
+	}
+}
+
+func handleClick(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+	if r.Body == nil {
+		http.Error(w, "body required", http.StatusBadRequest)
+		return
+	}
+	var req clickRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if req.AdID == 0 || req.CampaignID == 0 {
+		http.Error(w, "ad_id and campaign_id required", http.StatusBadRequest)
+		return
+	}
+	userID := req.UserID
+	if userID == "" {
+		userID = "anonymous"
+	}
+	if req.RequestID == "" {
+		req.RequestID = fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	go produceClick(impressionEvent{
+		RequestID:      req.RequestID,
+		UserID:         userID,
+		AdID:           req.AdID,
+		CampaignID:     req.CampaignID,
+		EventType:      "click",
+		PricePaidCents: 0,
+		Timestamp:      time.Now().UTC().Format(time.RFC3339),
+	})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 func fetchCandidates(ctx context.Context) ([]candidate, error) {

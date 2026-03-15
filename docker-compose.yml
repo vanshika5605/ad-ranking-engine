@@ -43,12 +43,29 @@ services:
     build:
       context: ./ad-server
       dockerfile: Dockerfile
+    depends_on:
+      kafka:
+        condition: service_healthy
     environment:
       DB_PATH: /app/data/adengine.db
+      KAFKA_BROKERS: kafka:29092
     volumes:
       - adserver_data:/app/data
     ports:
       - "8080:8080"
+
+  event-consumer:
+    build:
+      context: ./event-consumer
+      dockerfile: Dockerfile
+    depends_on:
+      - kafka
+      - ad-server
+    environment:
+      DB_PATH: /app/data/adengine.db
+      KAFKA_BROKERS: kafka:29092
+    volumes:
+      - adserver_data:/app/data
 
 volumes:
   adserver_data:
