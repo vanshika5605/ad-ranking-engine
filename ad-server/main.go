@@ -53,6 +53,10 @@ func main() {
 
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
+	// Wait up to 5s when DB is locked (e.g. event-consumer writing) instead of failing
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		log.Printf("warning: PRAGMA busy_timeout: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

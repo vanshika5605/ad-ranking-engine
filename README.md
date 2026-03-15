@@ -19,6 +19,19 @@ AI-powered ad ranking and second-price auction engine. See [docs/PLAN.md](docs/P
 - **Auction:** Uses effective bid = `bid_cents * score`; second-price on effective bid.
 - If the ranking service is down or not configured, ad-server falls back to score = 1.0 (bid-only).
 
+## Phase 4 (Training Pipeline)
+
+- **Training job:** Reads `events` from SQLite, trains a logistic regression (CTR: click vs impression), saves model to a shared volume.
+- **Ranking service:** Loads model from `MODEL_PATH` if present and uses it for scoring; otherwise uses the deterministic fallback.
+- **Generate traffic for training:** Run the simulator to create impressions and clicks (event-consumer writes them to SQLite).  
+  **Option A – Docker:** `docker compose --profile simulate run simulator` (500 requests, ~3% click rate).  
+  **Option B – Local:** `AD_SERVER_URL=http://localhost:8080 python simulator/simulate.py -n 500 -c 0.03`  
+  Override: `docker compose run simulator -- --requests 1000 --click-rate 0.05` or `simulate.py -n 1000 -c 0.05`.
+- **Run training (after you have ≥50 events):**  
+  `docker compose --profile train run train`  
+  Then restart ranking-service to pick up the new model:  
+  `docker compose restart ranking-service`
+
 ### Run with Docker
 
 ```bash
@@ -41,8 +54,9 @@ docker compose up -d ad-server
 ### Project layout
 
 - `ad-server/` — Go HTTP API, SQLite, second-price auction (effective bid = bid × pCTR), Kafka producer, ranking client
-- `ranking-service/` — Python FastAPI: `POST /rank` returns pCTR scores (simple model; Phase 4 adds training)
+- `ranking-service/` — Python FastAPI: `POST /rank` returns pCTR scores; loads trained model from volume or uses fallback. `train.py` + `Dockerfile.train` for offline training.
 - `event-consumer/` — Go: Kafka → SQLite events + campaign_stats_daily
+- `simulator/` — Python script: simulates ad requests + random clicks for training data
 - `docs/PLAN.md` — Full build plan and phases
 
 Later phases: training pipeline, dashboard, deploy.

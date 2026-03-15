@@ -47,6 +47,9 @@ func main() {
 	defer db.Close()
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		log.Printf("warning: PRAGMA busy_timeout: %v", err)
+	}
 	ctx := context.Background()
 	if err := db.PingContext(ctx); err != nil {
 		log.Fatalf("db ping: %v", err)
