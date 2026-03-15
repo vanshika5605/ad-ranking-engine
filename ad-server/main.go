@@ -102,10 +102,14 @@ func main() {
 	router.GET("/v1/ads", handleGetAds)
 	router.POST("/v1/click", handleClick)
 	router.GET("/health", handleHealth)
+	router.GET("/api/campaigns", handleAPICampaigns)
+	router.GET("/api/campaigns/:id/stats", handleAPICampaignStats)
+	router.GET("/api/suggestions", handleAPISuggestions)
 
 	addr := ":8080"
 	log.Printf("ad-server listening on %s (sqlite: %s)", addr, dbPath)
-	if err := http.ListenAndServe(addr, router); err != nil {
+	handler := corsMiddleware(router)
+	if err := http.ListenAndServe(addr, handler); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -452,4 +456,158 @@ func fetchCandidates(ctx context.Context) ([]candidate, error) {
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func handleAPICampaigns(w http.ResponseWriter, _ *http.Request, _ httprouter.Params) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	query := `
+		SELECT c.id, c.name, c.status, c.bid_cents,
+			COALESCE(SUM(s.impressions), 0) AS impressions,
+			COALESCE(SUM(s.clicks), 0) AS clicks,
+			COALESCE(SUM(s.spend_cents), 0) AS spend_cents
+		FROM campaigns c
+		LEFT JOIN campaign_stats_daily s ON s.campaign_id = c.id
+		GROUP BY c.id
+		ORDER BY c.id
+	`
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		log.Printf("api campaigns: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	type row struct {
+		ID          int64   `json:"id"`
+		Name        string  `json:"name"`
+		Status      string  `json:"status"`
+		BidCents    int64   `json:"bid_cents"`
+		Impressions int64   `json:"impressions"`
+		Clicks      int64   `json:"clicks"`
+		SpendCents  int64   `json:"spend_cents"`
+		CTR         float64 `json:"ctr"`
+	}
+	var list []row
+	for rows.Next() {
+		var r row
+		var imp, clk, spend int64
+		if err := rows.Scan(&r.ID, &r.Name, &r.Status, &r.BidCents, &imp, &clk, &spend); err != nil {
+			continue
+		}
+		r.Impressions = imp
+		r.Clicks = clk
+		r.SpendCents = spend
+		if imp > 0 {
+			r.CTR = float64(clk) / float64(imp) * 100
+		}
+		list = append(list, r)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(list)
+}
+
+func handleAPICampaignStats(w http.ResponseWriter, _ *http.Request, ps httprouter.Params) {
+	id := ps.ByName("id")
+	if id == "" {
+		http.Error(w, "id required", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	query := `SELECT date, impressions, clicks, spend_cents FROM campaign_stats_daily WHERE campaign_id = ? ORDER BY date`
+	rows, err := db.QueryContext(ctx, query, id)
+	if err != nil {
+		log.Printf("api campaign stats: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	type day struct {
+		Date        string `json:"date"`
+		Impressions int64  `json:"impressions"`
+		Clicks      int64  `json:"clicks"`
+		SpendCents  int64  `json:"spend_cents"`
+	}
+	var list []day
+	for rows.Next() {
+		var d day
+		if err := rows.Scan(&d.Date, &d.Impressions, &d.Clicks, &d.SpendCents); err != nil {
+			continue
+		}
+		list = append(list, d)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(list)
+}
+
+func handleAPISuggestions(w http.ResponseWriter, _ *http.Request, _ httprouter.Params) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	query := `
+		SELECT c.id, c.name, COALESCE(SUM(s.impressions), 0), COALESCE(SUM(s.clicks), 0), COALESCE(SUM(s.spend_cents), 0)
+		FROM campaigns c
+		LEFT JOIN campaign_stats_daily s ON s.campaign_id = c.id
+		GROUP BY c.id
+	`
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		log.Printf("api suggestions: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	var suggestions []map[string]string
+	for rows.Next() {
+		var id int64
+		var name string
+		var imp, clk, spend int64
+		if err := rows.Scan(&id, &name, &imp, &clk, &spend); err != nil {
+			continue
+		}
+		if imp == 0 {
+			suggestions = append(suggestions, map[string]string{
+				"campaign_id": fmt.Sprintf("%d", id),
+				"campaign":    name,
+				"type":        "no_traffic",
+				"message":     fmt.Sprintf("Campaign \"%s\" has no traffic yet. Run the simulator to generate impressions and clicks.", name),
+			})
+			continue
+		}
+		if imp < 10 {
+			continue
+		}
+		ctr := float64(clk) / float64(imp) * 100
+		if ctr < 1 && spend > 500 {
+			suggestions = append(suggestions, map[string]string{
+				"campaign_id": fmt.Sprintf("%d", id),
+				"campaign":    name,
+				"type":        "low_ctr_high_spend",
+				"message":     fmt.Sprintf("Campaign \"%s\" has low CTR (%.2f%%) and high spend (%d¢). Consider pausing or updating creatives.", name, ctr, spend),
+			})
+		}
+		if imp > 100 && ctr > 5 {
+			suggestions = append(suggestions, map[string]string{
+				"campaign_id": fmt.Sprintf("%d", id),
+				"campaign":    name,
+				"type":        "high_ctr",
+				"message":     fmt.Sprintf("Campaign \"%s\" has strong CTR (%.2f%%). Consider increasing bid to capture more volume.", name, ctr),
+			})
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(suggestions)
 }

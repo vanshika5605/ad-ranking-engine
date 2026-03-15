@@ -105,6 +105,17 @@ services:
     profiles:
       - simulate
 
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: http://localhost:8080
+    depends_on:
+      - ad-server
+    ports:
+      - "3000:80"
+
 volumes:
   adserver_data:
   model_data:

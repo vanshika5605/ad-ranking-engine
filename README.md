@@ -57,6 +57,13 @@ docker compose up -d ad-server
 - `ranking-service/` — Python FastAPI: `POST /rank` returns pCTR scores; loads trained model from volume or uses fallback. `train.py` + `Dockerfile.train` for offline training.
 - `event-consumer/` — Go: Kafka → SQLite events + campaign_stats_daily
 - `simulator/` — Python script: simulates ad requests + random clicks for training data
+- `dashboard/` — React (Vite) app: campaign list, daily stats, suggestions
 - `docs/PLAN.md` — Full build plan and phases
 
-Later phases: training pipeline, dashboard, deploy.
+## Phase 5 (Dashboard)
+
+- **Dashboard API** on ad-server: `GET /api/campaigns`, `GET /api/campaigns/:id/stats`, `GET /api/suggestions`.
+- **React dashboard** (Vite): campaign list with metrics, daily stats per campaign, optimization suggestions.
+- **Run:** `docker compose up -d dashboard` then open http://localhost:3000. Or locally: `cd dashboard && npm install && npm run dev` (proxy to ad-server on 8080).
+
+Later phases: deploy & harden.
