@@ -13,6 +13,12 @@ AI-powered ad ranking and second-price auction engine. See [docs/PLAN.md](docs/P
 - **Kafka:** Ad-server produces impression and click events to topics `impressions` and `clicks`.
 - **Event-consumer:** Consumes from Kafka, writes to SQLite (`events` table) and updates `campaign_stats_daily`.
 
+## Phase 3 (Ranking & ML)
+
+- **Ranking service (Python/FastAPI):** `POST /rank` returns pCTR scores per ad; ad-server calls it before the auction.
+- **Auction:** Uses effective bid = `bid_cents * score`; second-price on effective bid.
+- If the ranking service is down or not configured, ad-server falls back to score = 1.0 (bid-only).
+
 ### Run with Docker
 
 ```bash
@@ -34,8 +40,9 @@ docker compose up -d ad-server
 
 ### Project layout
 
-- `ad-server/` — Go HTTP API, SQLite schema/seed, second-price auction, Kafka producer (impressions, clicks)
-- `event-consumer/` — Go service: consumes Kafka → SQLite events + campaign_stats_daily
+- `ad-server/` — Go HTTP API, SQLite, second-price auction (effective bid = bid × pCTR), Kafka producer, ranking client
+- `ranking-service/` — Python FastAPI: `POST /rank` returns pCTR scores (simple model; Phase 4 adds training)
+- `event-consumer/` — Go: Kafka → SQLite events + campaign_stats_daily
 - `docs/PLAN.md` — Full build plan and phases
 
-Later phases: ranking service (ML), dashboard, deploy.
+Later phases: training pipeline, dashboard, deploy.

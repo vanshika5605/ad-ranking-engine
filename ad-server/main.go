@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -25,10 +26,12 @@ const (
 )
 
 var (
-	db            *sql.DB
-	impressWriter *kafka.Writer
-	clickWriter   *kafka.Writer
-	brokers       []string
+	db                  *sql.DB
+	impressWriter       *kafka.Writer
+	clickWriter         *kafka.Writer
+	brokers             []string
+	rankingServiceURL   string
+	rankingClient       *http.Client
 )
 
 func main() {
@@ -81,6 +84,14 @@ func main() {
 		log.Printf("kafka producer: %v", brokers)
 	} else {
 		log.Printf("kafka disabled (no KAFKA_BROKERS)")
+	}
+
+	rankingServiceURL = strings.TrimSuffix(os.Getenv("RANKING_SERVICE_URL"), "/")
+	if rankingServiceURL != "" {
+		rankingClient = &http.Client{Timeout: 500 * time.Millisecond}
+		log.Printf("ranking service: %s", rankingServiceURL)
+	} else {
+		log.Printf("ranking service disabled (no RANKING_SERVICE_URL)")
 	}
 
 	router := httprouter.New()
@@ -144,33 +155,46 @@ type candidate struct {
 	AdID       int64
 	CampaignID int64
 	BidCents   int64
+	Score      float64 // pCTR from ranking service; 1.0 if no ranking
 	Title      string
 	Body       string
 	ImageURL   string
 	LandingURL string
 }
 
-// byBid sorts by BidCents descending, then AdID for tie-break.
-type byBid []candidate
+// effectiveBid returns bid_cents * score for ranking-based auction.
+func (c candidate) effectiveBid() float64 {
+	if c.Score <= 0 {
+		return float64(c.BidCents)
+	}
+	return float64(c.BidCents) * c.Score
+}
 
-func (b byBid) Len() int           { return len(b) }
-func (b byBid) Less(i, j int) bool { return b[i].BidCents > b[j].BidCents || (b[i].BidCents == b[j].BidCents && b[i].AdID < b[j].AdID) }
-func (b byBid) Swap(i, j int)      { b[i], b[j] = b[j], b[i] }
+// byEffectiveBid sorts by effective bid descending, then AdID for tie-break.
+type byEffectiveBid []candidate
 
-// runSecondPriceAuction returns winner and price_paid_cents (second-highest bid or reserve).
+func (b byEffectiveBid) Len() int { return len(b) }
+func (b byEffectiveBid) Less(i, j int) bool {
+	ei, ej := b[i].effectiveBid(), b[j].effectiveBid()
+	return ei > ej || (ei == ej && b[i].AdID < b[j].AdID)
+}
+func (b byEffectiveBid) Swap(i, j int) { b[i], b[j] = b[j], b[i] }
+
+// runSecondPriceAuction returns winner and price_paid_cents (second-highest effective bid or reserve).
 func runSecondPriceAuction(candidates []candidate) (winner candidate, pricePaidCents int64) {
 	if len(candidates) == 0 {
 		return candidate{}, 0
 	}
 	sorted := make([]candidate, len(candidates))
 	copy(sorted, candidates)
-	sort.Sort(byBid(sorted))
+	sort.Sort(byEffectiveBid(sorted))
 	winner = sorted[0]
 	if len(sorted) < 2 {
 		pricePaidCents = reservePriceCents
 		return
 	}
-	pricePaidCents = sorted[1].BidCents
+	secondEff := sorted[1].effectiveBid()
+	pricePaidCents = int64(secondEff)
 	if pricePaidCents < reservePriceCents {
 		pricePaidCents = reservePriceCents
 	}
@@ -229,6 +253,22 @@ func handleGetAds(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{"ad": nil, "request_id": requestID})
 		return
+	}
+
+	// Attach ranking scores (pCTR); default 1.0 if ranking service unavailable
+	if err := attachScores(ctx, candidates, userID); err != nil {
+		log.Printf("ranking: %v (using score=1.0)", err)
+		for i := range candidates {
+			if candidates[i].Score == 0 {
+				candidates[i].Score = 1.0
+			}
+		}
+	} else {
+		for i := range candidates {
+			if candidates[i].Score == 0 {
+				candidates[i].Score = 1.0
+			}
+		}
 	}
 
 	winner, pricePaidCents := runSecondPriceAuction(candidates)
@@ -306,6 +346,74 @@ func handleClick(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// ranking API request/response
+type rankCandidate struct {
+	AdID       int64 `json:"ad_id"`
+	CampaignID int64 `json:"campaign_id"`
+	BidCents   int64 `json:"bid_cents"`
+}
+type rankRequest struct {
+	Candidates []rankCandidate `json:"candidates"`
+	Context    map[string]string `json:"context,omitempty"`
+}
+type rankScore struct {
+	AdID  int64   `json:"ad_id"`
+	Score float64 `json:"score"`
+}
+type rankResponse struct {
+	Scores []rankScore `json:"scores"`
+}
+
+func attachScores(ctx context.Context, candidates []candidate, userID string) error {
+	if rankingClient == nil || rankingServiceURL == "" {
+		for i := range candidates {
+			candidates[i].Score = 1.0
+		}
+		return nil
+	}
+	reqBody := rankRequest{
+		Candidates: make([]rankCandidate, len(candidates)),
+		Context:    map[string]string{"user_id": userID},
+	}
+	for i := range candidates {
+		reqBody.Candidates[i] = rankCandidate{
+			AdID:       candidates[i].AdID,
+			CampaignID: candidates[i].CampaignID,
+			BidCents:   candidates[i].BidCents,
+		}
+	}
+	body, _ := json.Marshal(reqBody)
+	req, err := http.NewRequestWithContext(ctx, "POST", rankingServiceURL+"/rank", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := rankingClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("ranking status %d", resp.StatusCode)
+	}
+	var out rankResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return err
+	}
+	scoreByAdID := make(map[int64]float64)
+	for _, s := range out.Scores {
+		scoreByAdID[s.AdID] = s.Score
+	}
+	for i := range candidates {
+		if s, ok := scoreByAdID[candidates[i].AdID]; ok {
+			candidates[i].Score = s
+		} else {
+			candidates[i].Score = 1.0
+		}
+	}
+	return nil
 }
 
 func fetchCandidates(ctx context.Context) ([]candidate, error) {
