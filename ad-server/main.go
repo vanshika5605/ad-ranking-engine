@@ -4,34 +4,36 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
-	"fmt"
 	"os"
 	"time"
 
-	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/julienschmidt/httprouter"
+	_ "modernc.org/sqlite"
 )
 
 var db *sql.DB
 
 func main() {
-	connStr := os.Getenv("DB_CONN")
-	if connStr == "" {
-		host := getEnv("DB_HOST", "localhost")
-		port := getEnv("DB_PORT", "5432")
-		user := getEnv("DB_USER", "adengine")
-		pass := getEnv("DB_PASSWORD", "adengine")
-		dbname := getEnv("DB_NAME", "adengine")
-		connStr = fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, dbname)
+	dbPath := os.Getenv("DB_PATH")
+	if dbPath == "" {
+		dbPath = "./data/adengine.db"
 	}
-	config, err := stdlib.ParseConfig(connStr)
+	if err := os.MkdirAll("./data", 0755); err != nil && !os.IsExist(err) {
+		log.Fatalf("mkdir data: %v", err)
+	}
+
+	var err error
+	db, err = sql.Open("sqlite", dbPath+"?_foreign_keys=on")
 	if err != nil {
-		log.Fatalf("parse config: %v", err)
+		log.Fatalf("open db: %v", err)
 	}
-	db = stdlib.OpenDB(*config)
 	defer db.Close()
+
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -39,15 +41,47 @@ func main() {
 		log.Fatalf("db ping: %v", err)
 	}
 
+	if err := runSchema(); err != nil {
+		log.Fatalf("run schema: %v", err)
+	}
+	if err := runSeedIfEmpty(ctx); err != nil {
+		log.Fatalf("run seed: %v", err)
+	}
+
 	router := httprouter.New()
 	router.GET("/v1/ads", handleGetAds)
 	router.GET("/health", handleHealth)
 
 	addr := ":8080"
-	log.Printf("ad-server listening on %s", addr)
+	log.Printf("ad-server listening on %s (sqlite: %s)", addr, dbPath)
 	if err := http.ListenAndServe(addr, router); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func runSchema() error {
+	schema, err := os.ReadFile("schema.sql")
+	if err != nil {
+		return fmt.Errorf("read schema: %w", err)
+	}
+	_, err = db.Exec(string(schema))
+	return err
+}
+
+func runSeedIfEmpty(ctx context.Context) error {
+	var n int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM campaigns").Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	seed, err := os.ReadFile("seed.sql")
+	if err != nil {
+		return fmt.Errorf("read seed: %w", err)
+	}
+	_, err = db.Exec(string(seed))
+	return err
 }
 
 func handleHealth(w http.ResponseWriter, _ *http.Request, _ httprouter.Params) {
@@ -70,7 +104,6 @@ func handleGetAds(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 	if userID == "" {
 		userID = "anonymous"
 	}
-	_ = r.URL.Query().Get("placement") // optional
 
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
@@ -88,7 +121,6 @@ func handleGetAds(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 		return
 	}
 
-	// Phase 1: simple auction — highest bid wins
 	winner := candidates[0]
 	for _, c := range candidates[1:] {
 		if c.BidCents > winner.BidCents {
@@ -112,14 +144,13 @@ func handleGetAds(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 }
 
 func fetchCandidates(ctx context.Context) ([]candidate, error) {
-	// Eligible: campaign status = active, optional: start_at <= now <= end_at
 	query := `
 		SELECT a.id, a.campaign_id, c.bid_cents, a.title, a.body, a.image_url, a.landing_url
 		FROM ads a
 		JOIN campaigns c ON c.id = a.campaign_id
 		WHERE c.status = 'active'
-		AND (c.start_at IS NULL OR c.start_at <= NOW())
-		AND (c.end_at IS NULL OR c.end_at >= NOW())
+		AND (c.start_at IS NULL OR c.start_at <= datetime('now'))
+		AND (c.end_at IS NULL OR c.end_at >= datetime('now'))
 		LIMIT 50
 	`
 	rows, err := db.QueryContext(ctx, query)
@@ -144,11 +175,4 @@ func fetchCandidates(ctx context.Context) ([]candidate, error) {
 		out = append(out, c)
 	}
 	return out, rows.Err()
-}
-
-func getEnv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }

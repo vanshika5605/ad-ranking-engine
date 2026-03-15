@@ -1,21 +1,4 @@
 services:
-  postgres:
-    image: postgres:15-alpine
-    environment:
-      POSTGRES_USER: adengine
-      POSTGRES_PASSWORD: adengine
-      POSTGRES_DB: adengine
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./postgres/init:/docker-entrypoint-initdb.d
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U adengine -d adengine"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
   redis:
     image: redis:7-alpine
     ports:
@@ -60,17 +43,12 @@ services:
     build:
       context: ./ad-server
       dockerfile: Dockerfile
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment:
-      DB_HOST: postgres
-      DB_PORT: 5432
-      DB_USER: adengine
-      DB_PASSWORD: adengine
-      DB_NAME: adengine
+      DB_PATH: /app/data/adengine.db
+    volumes:
+      - adserver_data:/app/data
     ports:
       - "8080:8080"
 
 volumes:
-  postgres_data:
+  adserver_data:
