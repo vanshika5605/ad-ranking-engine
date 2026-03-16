@@ -59,6 +59,8 @@ docker compose up -d ad-server
 - `simulator/` — Python script: simulates ad requests + random clicks for training data
 - `dashboard/` — React (Vite) app: campaign list, daily stats, suggestions
 - `docs/PLAN.md` — Full build plan and phases
+- `docs/RUNBOOK.md` — Runbook: start/stop, simulator, training, logs, load test
+- `scripts/load_test.py` — Load test for `GET /v1/ads` (RPS and latency)
 
 ## Phase 5 (Dashboard)
 
@@ -66,4 +68,4 @@ docker compose up -d ad-server
 - **React dashboard** (Vite): campaign list with metrics, daily stats per campaign, optimization suggestions.
 - **Run:** `docker compose up -d dashboard` then open http://localhost:3000. Or locally: `cd dashboard && npm install && npm run dev` (proxy to ad-server on 8080).
 
-Later phases: deploy & harden.
+**Runbook & load test:** See [docs/RUNBOOK.md](docs/RUNBOOK.md) for start/stop, simulator, training, logs, and load-test usage. Run `python scripts/load_test.py` (stack must be up) to measure RPS and latency for `GET /v1/ads`.
