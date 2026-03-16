@@ -13,13 +13,12 @@ docker compose up -d --build
 
 **Services and ports:**
 
-| Service          | Port  | Purpose                          |
-|------------------|-------|----------------------------------|
-| ad-server        | 8080  | Ad API, dashboard API            |
-| ranking-service  | 8081  | pCTR scoring                     |
-| dashboard        | 3000  | React UI                         |
-| Kafka            | 9092  | Event streaming                  |
-| Redis            | 6379  | (Reserved for future use)        |
+| Service          | Port  | Purpose                 |
+|------------------|-------|-------------------------|
+| ad-server        | 8080  | Ad API, dashboard API  |
+| ranking-service  | 8081  | pCTR scoring           |
+| dashboard        | 3000  | React UI               |
+| Kafka            | 9092  | Event streaming        |
 
 **Health checks:**
 
