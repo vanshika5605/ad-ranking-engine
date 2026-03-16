@@ -104,6 +104,7 @@ func main() {
 	router.GET("/health", handleHealth)
 	router.GET("/api/campaigns", handleAPICampaigns)
 	router.GET("/api/campaigns/:id/stats", handleAPICampaignStats)
+	router.GET("/api/campaigns/:id/ads", handleAPICampaignAds)
 	router.GET("/api/suggestions", handleAPISuggestions)
 
 	addr := ":8080"
@@ -491,15 +492,24 @@ func handleAPICampaigns(w http.ResponseWriter, _ *http.Request, _ httprouter.Par
 		return
 	}
 	defer rows.Close()
+	type adInfo struct {
+		ID         int64   `json:"id"`
+		CampaignID int64   `json:"campaign_id"`
+		Title      string  `json:"title"`
+		Body       *string `json:"body,omitempty"`
+		ImageURL   *string `json:"image_url,omitempty"`
+		LandingURL string  `json:"landing_url"`
+	}
 	type row struct {
-		ID          int64   `json:"id"`
-		Name        string  `json:"name"`
-		Status      string  `json:"status"`
-		BidCents    int64   `json:"bid_cents"`
-		Impressions int64   `json:"impressions"`
-		Clicks      int64   `json:"clicks"`
-		SpendCents  int64   `json:"spend_cents"`
-		CTR         float64 `json:"ctr"`
+		ID          int64    `json:"id"`
+		Name        string   `json:"name"`
+		Status      string   `json:"status"`
+		BidCents    int64    `json:"bid_cents"`
+		Impressions int64    `json:"impressions"`
+		Clicks      int64    `json:"clicks"`
+		SpendCents  int64    `json:"spend_cents"`
+		CTR         float64  `json:"ctr"`
+		Ads         []adInfo `json:"ads"`
 	}
 	var list []row
 	for rows.Next() {
@@ -514,7 +524,36 @@ func handleAPICampaigns(w http.ResponseWriter, _ *http.Request, _ httprouter.Par
 		if imp > 0 {
 			r.CTR = float64(clk) / float64(imp) * 100
 		}
+		r.Ads = []adInfo{}
 		list = append(list, r)
+	}
+	// Fetch all ads and attach to campaigns
+	adsRows, err := db.QueryContext(ctx, `SELECT id, campaign_id, title, body, image_url, landing_url FROM ads ORDER BY campaign_id, id`)
+	if err != nil {
+		log.Printf("api campaigns ads: %v", err)
+	} else {
+		defer adsRows.Close()
+		adsByCampaign := make(map[int64][]adInfo)
+		for adsRows.Next() {
+			var a adInfo
+			var body, imageURL sql.NullString
+			if err := adsRows.Scan(&a.ID, &a.CampaignID, &a.Title, &body, &imageURL, &a.LandingURL); err != nil {
+				continue
+			}
+			if body.Valid {
+				a.Body = &body.String
+			}
+			if imageURL.Valid {
+				a.ImageURL = &imageURL.String
+			}
+			adsByCampaign[a.CampaignID] = append(adsByCampaign[a.CampaignID], a)
+		}
+		for i := range list {
+			list[i].Ads = adsByCampaign[list[i].ID]
+			if list[i].Ads == nil {
+				list[i].Ads = []adInfo{}
+			}
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(list)
@@ -549,6 +588,49 @@ func handleAPICampaignStats(w http.ResponseWriter, _ *http.Request, ps httproute
 			continue
 		}
 		list = append(list, d)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(list)
+}
+
+func handleAPICampaignAds(w http.ResponseWriter, _ *http.Request, ps httprouter.Params) {
+	id := ps.ByName("id")
+	if id == "" {
+		http.Error(w, "id required", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	query := `SELECT id, campaign_id, title, body, image_url, landing_url FROM ads WHERE campaign_id = ? ORDER BY id`
+	rows, err := db.QueryContext(ctx, query, id)
+	if err != nil {
+		log.Printf("api campaign ads: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	type adRow struct {
+		ID         int64   `json:"id"`
+		CampaignID int64   `json:"campaign_id"`
+		Title      string  `json:"title"`
+		Body       *string `json:"body,omitempty"`
+		ImageURL   *string `json:"image_url,omitempty"`
+		LandingURL string  `json:"landing_url"`
+	}
+	var list []adRow
+	for rows.Next() {
+		var a adRow
+		var body, imageURL sql.NullString
+		if err := rows.Scan(&a.ID, &a.CampaignID, &a.Title, &body, &imageURL, &a.LandingURL); err != nil {
+			continue
+		}
+		if body.Valid {
+			a.Body = &body.String
+		}
+		if imageURL.Valid {
+			a.ImageURL = &imageURL.String
+		}
+		list = append(list, a)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(list)

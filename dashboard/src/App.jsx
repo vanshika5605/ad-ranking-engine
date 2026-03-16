@@ -43,8 +43,7 @@ function App() {
     setSelectedCampaign(id)
     try {
       const r = await fetch(`${API}/api/campaigns/${id}/stats`)
-      if (!r.ok) throw new Error(r.statusText)
-      const data = await r.json()
+      const data = r.ok ? await r.json() : []
       setStats(Array.isArray(data) ? data : [])
     } catch (e) {
       setStats([])
@@ -121,25 +120,44 @@ function App() {
                   <th>Clicks</th>
                   <th className="ctr">CTR %</th>
                   <th>Spend (¢)</th>
+                  <th>Ads</th>
                   <th></th>
                 </tr>
               </thead>
               <tbody>
-                {campaigns.map((c, i) => (
-                  <tr key={c.id ?? i}>
-                    <td>{c.id ?? '-'}</td>
-                    <td>{c.name ?? '-'}</td>
-                    <td><span className={`status ${c.status || 'unknown'}`}>{c.status ?? '-'}</span></td>
-                    <td>{c.bid_cents ?? c.bidCents ?? 0}</td>
-                    <td>{c.impressions ?? 0}</td>
-                    <td>{c.clicks ?? 0}</td>
-                    <td className="ctr">{(c.impressions ?? 0) > 0 ? (Number(c.ctr) || 0).toFixed(2) : '-'}</td>
-                    <td>{c.spend_cents ?? c.spendCents ?? 0}</td>
-                    <td>
-                      <button type="button" onClick={() => fetchCampaignStats(c.id)}>Stats</button>
-                    </td>
-                  </tr>
-                ))}
+                {campaigns.map((c, i) => {
+                  const ads = c.ads ?? []
+                  return (
+                    <React.Fragment key={c.id ?? i}>
+                      <tr>
+                        <td>{c.id ?? '-'}</td>
+                        <td>{c.name ?? '-'}</td>
+                        <td><span className={`status ${c.status || 'unknown'}`}>{c.status ?? '-'}</span></td>
+                        <td>{c.bid_cents ?? c.bidCents ?? 0}</td>
+                        <td>{c.impressions ?? 0}</td>
+                        <td>{c.clicks ?? 0}</td>
+                        <td className="ctr">{(c.impressions ?? 0) > 0 ? (Number(c.ctr) || 0).toFixed(2) : '-'}</td>
+                        <td>{c.spend_cents ?? c.spendCents ?? 0}</td>
+                        <td>{ads.length} ad{ads.length !== 1 ? 's' : ''}</td>
+                        <td>
+                          <button type="button" onClick={() => fetchCampaignStats(c.id)}>Stats</button>
+                        </td>
+                      </tr>
+                      {ads.length > 0 && ads.map((ad) => (
+                        <tr key={ad.id} className="ad-row">
+                          <td colSpan={5} style={{ paddingLeft: '2rem', borderTop: 'none' }}></td>
+                          <td colSpan={2} style={{ borderTop: 'none', fontSize: '0.9rem' }}>
+                            <strong>{ad.title}</strong>
+                            {ad.body && <span style={{ color: '#94a3b8', marginLeft: '0.5rem' }}>— {(ad.body || '').slice(0, 60)}{(ad.body && ad.body.length > 60) ? '…' : ''}</span>}
+                          </td>
+                          <td colSpan={3} style={{ borderTop: 'none', fontSize: '0.85rem' }}>
+                            <a href={ad.landing_url} target="_blank" rel="noopener noreferrer">{ad.landing_url}</a>
+                          </td>
+                        </tr>
+                      ))}
+                    </React.Fragment>
+                  )
+                })}
               </tbody>
             </table>
             <p style={{ marginTop: '0.5rem' }}>
@@ -155,7 +173,35 @@ function App() {
 
       {selectedCampaign && campaignById[selectedCampaign] != null && (
         <section>
-          <h2>Daily stats: {campaignById[selectedCampaign]?.name ?? 'Campaign ' + selectedCampaign}</h2>
+          <h2>{campaignById[selectedCampaign]?.name ?? 'Campaign ' + selectedCampaign}</h2>
+
+          <h3>Ads in this campaign</h3>
+          {((campaignById[selectedCampaign]?.ads) || []).length === 0 ? (
+            <p className="loading">No ads in this campaign.</p>
+          ) : (
+            <table className="stats-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Title</th>
+                  <th>Body</th>
+                  <th>Landing URL</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(campaignById[selectedCampaign]?.ads || []).map((ad) => (
+                  <tr key={ad.id}>
+                    <td>{ad.id}</td>
+                    <td>{ad.title ?? '-'}</td>
+                    <td>{(ad.body || '').slice(0, 80)}{(ad.body && ad.body.length > 80) ? '…' : ''}</td>
+                    <td><a href={ad.landing_url} target="_blank" rel="noopener noreferrer">{ad.landing_url}</a></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          <h3>Daily stats</h3>
           <table className="stats-table">
             <thead>
               <tr>
