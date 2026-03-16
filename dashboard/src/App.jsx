@@ -68,7 +68,7 @@ function App() {
 
   if (loading) {
     return (
-      <div>
+      <div className="app-shell">
         <h1>Ad Ranking Dashboard</h1>
         <div className="loading">Loading campaigns…</div>
       </div>
@@ -76,7 +76,7 @@ function App() {
   }
   if (error) {
     return (
-      <div>
+      <div className="app-shell">
         <h1>Ad Ranking Dashboard</h1>
         <div className="error">
           Error: {error}. Is the ad-server running on port 8080? Try: docker compose up -d ad-server
@@ -99,40 +99,57 @@ function App() {
   })
 
   return (
-    <>
-      <h1>Ad Ranking Dashboard</h1>
+    <div className="app-shell">
+      <div>
+        <h1>Ad Ranking Dashboard</h1>
+        <p className="page-subtitle">Monitor campaigns, review optimization suggestions, and inspect stats side‑by‑side.</p>
+      </div>
 
-      <section>
-        <h2>Campaigns</h2>
-        {showTable ? (
-          <>
-            <p style={{ marginBottom: '0.75rem', color: '#94a3b8', fontSize: '0.9rem' }}>
-              Showing {campaigns.length} campaign{campaigns.length !== 1 ? 's' : ''}
-            </p>
-            <table>
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>Name</th>
-                  <th>Status</th>
-                  <th>Bid (¢)</th>
-                  <th>Impressions</th>
-                  <th>Clicks</th>
-                  <th className="ctr">CTR %</th>
-                  <th>Spend (¢)</th>
-                  <th>Ads</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {campaigns.map((c, i) => {
-                  const ads = c.ads ?? []
-                  return (
-                    <React.Fragment key={c.id ?? i}>
-                      <tr>
+      <div className="app-main-row">
+        <section className="card card-table">
+          <div className="card-header">
+            <div className="card-title">Campaigns</div>
+            {showTable && (
+              <div className="card-meta">
+                {campaigns.length} campaign{campaigns.length !== 1 ? 's' : ''}
+              </div>
+            )}
+          </div>
+          {showTable ? (
+            <>
+              <table>
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Name</th>
+                    <th>Status</th>
+                    <th>Bid (¢)</th>
+                    <th>Impressions</th>
+                    <th>Clicks</th>
+                    <th className="ctr">CTR %</th>
+                    <th>Spend (¢)</th>
+                    <th>Ads</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {campaigns.map((c, i) => {
+                    const ads = c.ads ?? []
+                    const isSelected = selectedCampaign === c.id
+                    return (
+                      <tr
+                        key={c.id ?? i}
+                        className={`campaign-row${isSelected ? ' selected' : ''}`}
+                        onClick={() => fetchCampaignStats(c.id)}
+                      >
                         <td>{c.id ?? '-'}</td>
                         <td>{c.name ?? '-'}</td>
-                        <td><span className={`status ${c.status || 'unknown'}`}>{c.status ?? '-'}</span></td>
+                        <td>
+                          <span className={`status ${c.status || 'unknown'}`}>
+                            <span className="status-dot" />
+                            {c.status ?? '-'}
+                          </span>
+                        </td>
                         <td>{c.bid_cents ?? c.bidCents ?? 0}</td>
                         <td>{c.impressions ?? 0}</td>
                         <td>{c.clicks ?? 0}</td>
@@ -140,99 +157,101 @@ function App() {
                         <td>{c.spend_cents ?? c.spendCents ?? 0}</td>
                         <td>{ads.length} ad{ads.length !== 1 ? 's' : ''}</td>
                         <td>
-                          <button type="button" onClick={() => fetchCampaignStats(c.id)}>Stats</button>
+                          <button type="button" onClick={(e) => { e.stopPropagation(); fetchCampaignStats(c.id) }}>Stats</button>
                         </td>
                       </tr>
-                      {ads.length > 0 && ads.map((ad) => (
-                        <tr key={ad.id} className="ad-row">
-                          <td colSpan={5} style={{ paddingLeft: '2rem', borderTop: 'none' }}></td>
-                          <td colSpan={2} style={{ borderTop: 'none', fontSize: '0.9rem' }}>
-                            <strong>{ad.title}</strong>
-                            {ad.body && <span style={{ color: '#94a3b8', marginLeft: '0.5rem' }}>— {(ad.body || '').slice(0, 60)}{(ad.body && ad.body.length > 60) ? '…' : ''}</span>}
-                          </td>
-                          <td colSpan={3} style={{ borderTop: 'none', fontSize: '0.85rem' }}>
-                            <a href={ad.landing_url} target="_blank" rel="noopener noreferrer">{ad.landing_url}</a>
-                          </td>
-                        </tr>
-                      ))}
-                    </React.Fragment>
-                  )
-                })}
-              </tbody>
-            </table>
-            <p style={{ marginTop: '0.5rem' }}>
-              <button type="button" onClick={() => { fetchCampaigns(); fetchSuggestions(); }}>Refresh</button>
-            </p>
-          </>
-        ) : (
-          <p className="loading">
-            No campaigns. Ensure ad-server is running and the DB has seed data (restart ad-server to run migrations + seed).
-          </p>
-        )}
-      </section>
-
-      {selectedCampaign && campaignById[selectedCampaign] != null && (
-        <section>
-          <h2>{campaignById[selectedCampaign]?.name ?? 'Campaign ' + selectedCampaign}</h2>
-
-          <h3>Ads in this campaign</h3>
-          {((campaignById[selectedCampaign]?.ads) || []).length === 0 ? (
-            <p className="loading">No ads in this campaign.</p>
+                    )
+                  })}
+                </tbody>
+              </table>
+              <p style={{ marginTop: '0.8rem' }}>
+                <button type="button" onClick={() => { fetchCampaigns(); fetchSuggestions(); }}>Refresh data</button>
+              </p>
+            </>
           ) : (
-            <table className="stats-table">
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>Title</th>
-                  <th>Body</th>
-                  <th>Landing URL</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(campaignById[selectedCampaign]?.ads || []).map((ad) => (
-                  <tr key={ad.id}>
-                    <td>{ad.id}</td>
-                    <td>{ad.title ?? '-'}</td>
-                    <td>{(ad.body || '').slice(0, 80)}{(ad.body && ad.body.length > 80) ? '…' : ''}</td>
-                    <td><a href={ad.landing_url} target="_blank" rel="noopener noreferrer">{ad.landing_url}</a></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <p className="loading">
+              No campaigns. Ensure ad-server is running and the DB has seed data (restart ad-server to run migrations + seed).
+            </p>
           )}
-
-          <h3>Daily stats</h3>
-          <table className="stats-table">
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Impressions</th>
-                <th>Clicks</th>
-                <th>Spend (¢)</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(stats || []).length === 0 ? (
-                <tr><td colSpan={4}>No daily data yet. Run the simulator to generate traffic.</td></tr>
-              ) : (
-                (stats || []).map((d, i) => (
-                  <tr key={d.date ?? i}>
-                    <td>{d.date ?? '-'}</td>
-                    <td>{d.impressions ?? 0}</td>
-                    <td>{d.clicks ?? 0}</td>
-                    <td>{d.spend_cents ?? d.spendCents ?? 0}</td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
         </section>
-      )}
 
-      <section>
-        <h2>Suggestions</h2>
+        <section className="card card-detail">
+          <div className="card-header">
+            <div className="card-title">Selected campaign</div>
+            {selectedCampaign && campaignById[selectedCampaign] != null && (
+              <div className="card-meta">
+                {campaignById[selectedCampaign]?.name ?? 'Campaign ' + selectedCampaign}
+              </div>
+            )}
+          </div>
+          {!selectedCampaign || campaignById[selectedCampaign] == null ? (
+            <p className="loading">
+              Select a campaign in the table to view its ads and daily stats.
+            </p>
+          ) : (
+            <>
+              <h3 style={{ fontSize: '0.9rem', margin: '0 0 0.5rem', color: '#9ca3af' }}>Ads</h3>
+              {((campaignById[selectedCampaign]?.ads) || []).length === 0 ? (
+                <p className="loading" style={{ marginTop: 0 }}>No ads in this campaign.</p>
+              ) : (
+                <table className="stats-table" style={{ marginBottom: '0.9rem' }}>
+                  <thead>
+                    <tr>
+                      <th>ID</th>
+                      <th>Title</th>
+                      <th>Body</th>
+                      <th>Landing URL</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(campaignById[selectedCampaign]?.ads || []).map((ad) => (
+                      <tr key={ad.id}>
+                        <td>{ad.id}</td>
+                        <td>{ad.title ?? '-'}</td>
+                        <td>{(ad.body || '').slice(0, 80)}{(ad.body && ad.body.length > 80) ? '…' : ''}</td>
+                        <td><a href={ad.landing_url} target="_blank" rel="noopener noreferrer">{ad.landing_url}</a></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+
+              <h3 style={{ fontSize: '0.9rem', margin: '0 0 0.5rem', color: '#9ca3af' }}>Daily stats</h3>
+              <table className="stats-table">
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Impressions</th>
+                    <th>Clicks</th>
+                    <th>Spend (¢)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(stats || []).length === 0 ? (
+                    <tr><td colSpan={4}>No daily data yet. Run the simulator to generate traffic.</td></tr>
+                  ) : (
+                    (stats || []).map((d, i) => (
+                      <tr key={d.date ?? i}>
+                        <td>{d.date ?? '-'}</td>
+                        <td>{d.impressions ?? 0}</td>
+                        <td>{d.clicks ?? 0}</td>
+                        <td>{d.spend_cents ?? d.spendCents ?? 0}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </>
+          )}
+        </section>
+      </div>
+
+      <section className="card card-suggestions">
+        <div className="card-header">
+          <div className="card-title">Suggestions</div>
+        </div>
         {(suggestions || []).length === 0 ? (
-          <p className="loading">
+          <p className="suggestions-empty">
             No suggestions yet. Suggestions appear when campaigns have enough traffic (e.g. low CTR + high spend, or high CTR). Run the simulator to generate more data.
           </p>
         ) : (
@@ -246,7 +265,7 @@ function App() {
           </ul>
         )}
       </section>
-    </>
+    </div>
   )
 }
 
